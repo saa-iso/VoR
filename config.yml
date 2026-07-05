@@ -4,9 +4,15 @@
 # This file controls all production flags and channel settings.
 # Edit this file to enable/disable features without touching code.
 
+# ── Social Media (Bluesky / X) ────────────────────────────────
+social:
+  # Master switch: false = scrape + cache text only, no Bluesky/X posting.
+  # YouTube upload is unaffected by this flag — it uses its own pipeline.
+  enabled: false
+
 # ── Video Production ─────────────────────────────────────────
 video:
-  # Master switch: false = scrape + post to Bluesky/Twitter only
+  # Master switch: false = scrape only (no video/YouTube pipeline)
   enabled: true
 
 # ── English Channel ──────────────────────────────────────────
