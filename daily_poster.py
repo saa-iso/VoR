@@ -128,6 +128,8 @@ try:
 except Exception:
     tweepy = None
 
+from vor_config import config
+
 # -----------------------
 # Configuration
 # -----------------------
@@ -823,6 +825,19 @@ def main():
         #   a: flat charcoal  b: blurred forest  c: gradient
         #   d: textured       e: semi-transparent forest
         compose_variant("b", page_title, full_text, png_path)
+
+    # ── Social posting gate ────────────────────────────────────────────────
+    # config.social_enabled (config.yml → social.enabled) controls Bluesky/X
+    # posting only. Scraping and thumbnail generation above always run
+    # regardless of this flag, since the YouTube video pipeline depends on
+    # the cached meditation text file this step produces.
+    if not config.social_enabled:
+        logger.info(
+            "Social posting disabled (config.yml social.enabled: false) — "
+            "skipping Bluesky/X. Text scraped and cached for video pipeline."
+        )
+        print(f"\n=== SOCIAL DISABLED — text cached for {mmdd}, no posts made ===\n")
+        return
 
     bsky_text = build_bsky_text(full_text)
     x_text = build_x_text(full_text)

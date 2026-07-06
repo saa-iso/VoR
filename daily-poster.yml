@@ -1,0 +1,429 @@
+name: Daily Meditation Poster
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VoR Daily Meditation — GitHub Actions Workflow
+# Version: 2026-07-05.13
+#
+# Changes in .13 (2026-07-05):
+# - Added YT_PLAYLIST_ID_EN as a passthrough repository Variable in the
+#   "Upload English video to YouTube" step. Previously the workflow never
+#   set this env var at all, so upload_youtube.py silently fell back to a
+#   playlist ID hardcoded from the original developer's channel — causing
+#   HttpError 403 playlistItemsNotAccessible for any other channel/account.
+#   Set the YT_PLAYLIST_ID_EN repository Variable to a playlist ID on your
+#   own channel to enable playlist assignment; leave it unset to upload
+#   without adding to any playlist.
+#
+# Changes in .12 (2026-07-05):
+# - CORRECTED a mistake introduced in .11. GitHub Actions semantics are the
+#   OPPOSITE of what .11 assumed: continue-on-error forces conclusion to
+#   'success' even when the step's command actually failed. outcome is the
+#   real, pre-override result. .11 switched all gates from outcome to
+#   conclusion based on a backwards understanding — this silently let
+#   downstream steps run after real upstream failures (e.g. "Upload English
+#   video to YouTube" ran after a failed "Build English video" because
+#   continue-on-error had forced build_en's conclusion to 'success'), and
+#   caused failure notifications to never fire since conclusion never
+#   equals 'failure' on a continue-on-error step.
+#   Fix: every gate on a continue-on-error step (background, build_en,
+#   upload_en, translate_es, build_es, upload_es) now checks .outcome.
+#   steps.social and steps.commit are unaffected (no continue-on-error on
+#   those steps, so outcome and conclusion are always identical there).
+#
+# Changes in .11 (2026-03-23):
+# - (Superseded by .12 above — this change was based on a backwards
+#   understanding of outcome vs conclusion and has been reverted.)
+#
+# Changes in .11 (2026-03-23):
+# - Fixed failure notifications never firing for continue-on-error steps.
+#   When a step has continue-on-error: true, GitHub sets outcome='success'
+#   even if the command exits non-zero — only conclusion='failure' tells
+#   the truth. All failure notification conditions now check conclusion
+#   instead of outcome. This affected the Spanish pipeline (translate, build,
+#   upload), the background download, and the English video steps — all of
+#   which had continue-on-error: true but were checking outcome=='failure'.
+#
+# Changes in .10 (2026-03-23):
+# - Fixed .posted file being wiped by 'git checkout -- .' in the commit step.
+#   The .posted file is written by daily_poster.py during Step 1, but before
+#   it was ever staged, git checkout -- . discarded it, so it was never
+#   committed and the duplicate guard never fired on subsequent runs.
+#   Fix: save meditations/MM-DD.posted to /tmp before git checkout, then
+#   restore it after git pull --rebase — same pattern used for .vor-state.json.
+#
+# Changes in .09 (2026-03-22):
+# - Fixed last_video_idx never advancing. git stash pop was silently failing
+#   on conflict with .vor-state.json (stash pop || true), leaving the remote
+#   stale version on disk. Voice advanced (last_voice_idx) but video index
+#   stayed at 0 every run. Fix: copy .vor-state.json to /tmp before git ops,
+#   restore it after pull --rebase, bypassing stash entirely for state files.
+#
+# Changes in .08 (2026-03-22):
+# - Fixed second rebase failure in commit step. build-video.sh gets chmod +x
+#   during the run, leaving it as an unstaged change that blocks the post-commit
+#   rebase. Fix: restore build-video.sh to its committed state (discarding the
+#   mode-only change) before the rebase+push block.
+#
+# Changes in .07 (2026-03-15):
+# - Added chmod +x build-video.sh before running it. Filesystem tool writes
+#   strip executable bits, so the script loses +x on each commit.
+# - Added git stash before git pull --rebase in commit step to handle
+#   unstaged changes (e.g. .vor-state.json written mid-run) that blocked rebase.
+#
+# Changes in .06 (2026-03-15):
+# - Removed .vor-state.json from .gitignore so rotation state persists
+#   across GitHub Actions runner instances.
+# - Changed git add .vor-state.json to git add -f .vor-state.json in the
+#   commit step as belt-and-suspenders (prevents gitignore warnings that
+#   were causing the commit step to silently skip .posted files).
+#
+# Changes in .05 (2026-03-11):
+# - Added meditations/*.posted to the commit step git add command.
+#
+# Changes in .04 (2026-03-11):
+# - Fixed commit step: replaced 'git add --ignore-missing' with shell
+#   conditional for .vor-state.json (git 2.53 compatibility).
+#
+# Changes in .03 (2026-03-11):
+# - Attempted --ignore-missing fix — did not work on runner git 2.53.0.
+#
+# Changes in .02 (2026-03-11):
+# - Replaced config.yml video flag check with GitHub Actions Variables.
+# - Added Pushover notifications on any step failure.
+# - Added soft Pushover warning for Pexels 404 fallback.
+# - Isolated video pipeline with continue-on-error.
+# - Commit step always runs via if: always().
+#
+# Changes in .01 (original):
+# - Initial workflow.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# GITHUB ACTIONS VARIABLES (Settings → Secrets and variables → Variables):
+#   ENABLE_VIDEO    — set to 'true' to enable video build + YouTube upload
+#   ENABLE_SPANISH  — set to 'true' to enable Spanish translation + video
+#                     (only takes effect when ENABLE_VIDEO is also 'true')
+#
+# GITHUB SECRETS REQUIRED (Settings → Secrets and variables → Secrets):
+#   BSKY_USERNAME, BSKY_APP_PASSWORD       — Bluesky credentials
+#   X_API_KEY, X_API_SECRET                — X/Twitter API credentials
+#   X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET  — X/Twitter access credentials
+#   PEXELS_API_KEY                         — Pexels API key for backgrounds
+#   ANTHROPIC_API_KEY                      — Anthropic API (Spanish translation)
+#   YT_TOKEN_JSON                          — YouTube OAuth token (English channel)
+#   YT_TOKEN_JSON_ES                       — YouTube OAuth token (Spanish channel)
+#   PUSHOVER_USER_KEY                      — Pushover user key
+#   PUSHOVER_APP_TOKEN                     — Pushover app token for VoR
+#
+# PUSHOVER PRIORITY LEVELS USED:
+#   -1  Quiet          — Daily success notification
+#    0  Normal         — Step failure needing investigation
+#    1  High           — Total social post failure (nothing posted today)
+#
+# NOTE ON continue-on-error AND NOTIFICATIONS:
+#   Steps with continue-on-error: true always show conclusion='success' even
+#   when the command fails — continue-on-error forces conclusion to success
+#   so the job doesn't halt. outcome reflects the real, pre-override result.
+#   All failure/success gates below use outcome, not conclusion, for any
+#   step that has continue-on-error: true.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Runs at 1 AM Pacific (9 AM UTC)
+    - cron: '0 9 * * *'
+
+  # Allows manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  post-meditation:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── Setup ────────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── Step 1: Scrape meditation text (+ post to Bluesky/X if enabled) ──────
+      #
+      # daily_poster.py checks for meditations/MM-DD.posted before posting.
+      # If found, exits 0 cleanly — prevents duplicates on manual re-runs.
+      #
+      # This step always runs even with social posting disabled: it scrapes
+      # and caches meditations/MM-DD.txt, which the video pipeline below
+      # depends on. Bluesky/X posting itself is gated by config.yml
+      # (social.enabled) inside daily_poster.py, not by this workflow.
+      #
+      - name: Scrape meditation (+ social post if enabled)
+        id: social
+        env:
+          BSKY_USERNAME: ${{ secrets.BSKY_USERNAME }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+        run: |
+          python daily_poster.py
+
+      - name: Notify — Step 1 failure (scrape or total social post failure)
+        if: failure() && steps.social.outcome == 'failure'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR FAILURE: Social post" \
+            --form-string "message=Daily meditation scrape or social posting failed on $(date +'%m-%d'). Check GitHub Actions logs." \
+            --form-string "priority=1" \
+            https://api.pushover.net/1/messages.json
+
+      # ── Step 2: Download background video from Pexels ────────────────────────
+      - name: Download background video from Pexels
+        id: background
+        if: vars.ENABLE_VIDEO == 'true'
+        continue-on-error: true
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          python download_background.py --output /tmp/background.mp4
+
+      - name: Notify — Pexels video skipped (soft warning)
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
+        run: |
+          if [ -f /tmp/pexels_warning.txt ]; then
+            MSG=$(cat /tmp/pexels_warning.txt)
+            curl -s \
+              --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+              --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+              --form-string "title=VoR Warning: Pexels video skipped" \
+              --form-string "message=${MSG}" \
+              --form-string "priority=-1" \
+              https://api.pushover.net/1/messages.json
+          fi
+
+      - name: Notify — background download failed
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'failure'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR FAILURE: Background video" \
+            --form-string "message=All Pexels video IDs failed on $(date +'%m-%d'). No video built today. Check backgrounds.txt." \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+
+      # ── Step 3: Install video dependencies ───────────────────────────────────
+      - name: Install video dependencies (ffmpeg + edge-tts)
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg fonts-liberation
+          pip install edge-tts pillow
+
+      # ── Step 4: Build and upload English video to YouTube ────────────────────
+      - name: Build English video
+        id: build_en
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
+        continue-on-error: true
+        run: |
+          chmod +x build-video.sh
+          MMDD=$(date +'%m-%d')
+          YEAR=$(date +'%Y')
+          BACKGROUND_VIDEO=/tmp/background.mp4 ./build-video.sh $MMDD $YEAR
+
+      - name: Upload English video to YouTube
+        id: upload_en
+        if: vars.ENABLE_VIDEO == 'true' && steps.build_en.outcome == 'success'
+        continue-on-error: true
+        env:
+          YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
+          # Set this repository Variable to a playlist ID on YOUR channel.
+          # Left unset, videos upload fine but skip playlist assignment —
+          # the script's hardcoded fallback ID belongs to a different
+          # channel and will fail with playlistItemsNotAccessible.
+          YT_PLAYLIST_ID_EN: ${{ vars.YT_PLAYLIST_ID_EN }}
+        run: |
+          python upload_youtube.py
+
+      - name: Notify — English video failure
+        if: |
+          vars.ENABLE_VIDEO == 'true' &&
+          (steps.build_en.outcome == 'failure' || steps.upload_en.outcome == 'failure')
+        run: |
+          STAGE="build"
+          if [ "${{ steps.build_en.outcome }}" == "success" ]; then STAGE="upload"; fi
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR FAILURE: English video ${STAGE}" \
+            --form-string "message=English video ${STAGE} failed on $(date +'%m-%d'). Check GitHub Actions logs." \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+
+      # ── Step 5: Translate, build, and upload Spanish video ───────────────────
+      - name: Translate meditation to Spanish
+        id: translate_es
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.background.outcome == 'success'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          MMDD=$(date +'%m-%d')
+          python translate_meditation.py --date $MMDD
+
+      - name: Notify — Spanish translation failure
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.translate_es.outcome == 'failure'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR FAILURE: Spanish translation" \
+            --form-string "message=Spanish translation failed on $(date +'%m-%d'). No Spanish video today. Check GitHub Actions logs." \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+
+      - name: Build Spanish video
+        id: build_es
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.translate_es.outcome == 'success'
+        continue-on-error: true
+        run: |
+          chmod +x build-video.sh
+          MMDD=$(date +'%m-%d')
+          YEAR=$(date +'%Y')
+          VOR_LANG=es BACKGROUND_VIDEO=/tmp/background.mp4 ./build-video.sh $MMDD $YEAR
+
+      - name: Upload Spanish video to YouTube
+        id: upload_es
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.build_es.outcome == 'success'
+        continue-on-error: true
+        env:
+          YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
+          YT_PLAYLIST_ID_ES: PL8OsToLnGRr9Ll4Sa-gog1q4_Tucx34KP
+        run: |
+          VOR_LANG=es python upload_youtube.py
+
+      - name: Notify — Spanish build or upload failure
+        if: |
+          vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' &&
+          (steps.build_es.outcome == 'failure' || steps.upload_es.outcome == 'failure')
+        run: |
+          STAGE="build"
+          if [ "${{ steps.build_es.outcome }}" == "success" ]; then STAGE="upload"; fi
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR FAILURE: Spanish video ${STAGE}" \
+            --form-string "message=Spanish video ${STAGE} failed on $(date +'%m-%d'). Check GitHub Actions logs." \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+
+      # ── Step 6: Commit new files to repo ─────────────────────────────────────
+      #
+      # Always runs via if: always(). Commits meditation text, .posted flag
+      # files (duplicate guard), and .vor-state.json (voice/video rotation).
+      #
+      # Key principle: any file written during the run that needs to survive
+      # the git checkout -- . cleanup must be saved to /tmp first and
+      # restored afterward. We do this for both .vor-state.json and the
+      # daily .posted file.
+      #
+      - name: Commit and push new files
+        id: commit
+        if: always()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          MMDD=$(date +'%m-%d')
+
+          # Save run-generated files to /tmp before git checkout wipes them.
+          # git checkout -- . is needed to clean the working tree for rebase,
+          # but it discards any unstaged files written during the run.
+          if [ -f .vor-state.json ]; then
+            cp .vor-state.json /tmp/vor-state-run.json
+            echo "Saved run state: $(cat /tmp/vor-state-run.json)"
+          fi
+          if [ -f "meditations/${MMDD}.posted" ]; then
+            cp "meditations/${MMDD}.posted" /tmp/posted-run.txt
+            echo "Saved .posted file for ${MMDD}"
+          fi
+
+          # Clean working tree so rebase has nothing to complain about,
+          # then pull remote.
+          git checkout -- . || true
+          git pull --rebase
+
+          # Restore run-generated files on top of the pulled remote state.
+          if [ -f /tmp/vor-state-run.json ]; then
+            cp /tmp/vor-state-run.json .vor-state.json
+            echo "Restored run state"
+          fi
+          if [ -f /tmp/posted-run.txt ]; then
+            cp /tmp/posted-run.txt "meditations/${MMDD}.posted"
+            echo "Restored .posted file for ${MMDD}"
+          fi
+
+          git add meditations/*.txt meditations/*.posted
+          [ -f .vor-state.json ] && git add -f .vor-state.json && echo "Added .vor-state.json" || echo "No .vor-state.json to commit (video disabled)"
+          if git diff --staged --quiet; then
+            echo "No new files to commit"
+          else
+            git commit -m "Daily meditation $(date +'%m-%d')"
+            git fetch origin main
+            git checkout -- . || true
+            git rebase origin/main || git rebase --skip
+            git push origin main
+          fi
+
+      - name: Notify — commit step failed
+        if: always() && steps.commit.outcome == 'failure'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR FAILURE: Git commit" \
+            --form-string "message=Git commit/push failed on $(date +'%m-%d'). Meditation files may not be saved to repo." \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+
+      # ── Step 7: Success notification ─────────────────────────────────────────
+      #
+      # Fires only when the commit step succeeded AND no video/Spanish failures
+      # occurred. If any continue-on-error step failed, we already sent a
+      # failure Pushover above — so the success notification is suppressed
+      # to avoid a confusing "all good" ping after a failure alert.
+      #
+      - name: Notify — success
+        if: |
+          always() &&
+          steps.commit.outcome == 'success' &&
+          steps.background.outcome != 'failure' &&
+          steps.build_en.outcome != 'failure' &&
+          steps.upload_en.outcome != 'failure' &&
+          steps.translate_es.outcome != 'failure' &&
+          steps.build_es.outcome != 'failure' &&
+          steps.upload_es.outcome != 'failure'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "title=VoR ✓ Daily run complete" \
+            --form-string "message=Meditation posted $(date +'%m-%d'). Social posts and video done." \
+            --form-string "priority=-1" \
+            https://api.pushover.net/1/messages.json

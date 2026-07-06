@@ -26,6 +26,10 @@ class VoRConfig:
             self._raw = yaml.safe_load(f)
 
     @property
+    def social_enabled(self) -> bool:
+        return self._raw.get("social", {}).get("enabled", True)
+
+    @property
     def video_enabled(self) -> bool:
         return self._raw.get("video", {}).get("enabled", False)
 
@@ -87,6 +91,7 @@ class VoRConfig:
         print("=" * 50)
         print("VoR Configuration")
         print("=" * 50)
+        print(f"  Social (BSky/X):   {'✅ ON' if self.social_enabled else '❌ OFF'}")
         print(f"  Video production:  {'✅ ON' if self.video_enabled else '❌ OFF'}")
         print(f"  English channel:   {'✅ ON' if self.english_enabled else '❌ OFF'}")
         print(f"  Spanish channel:   {'✅ ON' if self.spanish_enabled else '❌ OFF'}")
