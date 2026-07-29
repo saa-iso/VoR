@@ -99,8 +99,7 @@ name: Daily Meditation Poster
 
 on:
   schedule:
-    # Runs at 1 AM Pacific (9 AM UTC)
-    - cron: '0 9 * * *'
+    - cron: '30 6 * * *'  # 1:30 AM CDT (UTC-5, summer)
 
   # Allows manual trigger from GitHub Actions tab
   workflow_dispatch:
