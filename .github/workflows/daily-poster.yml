@@ -2,7 +2,37 @@ name: Daily Meditation Poster
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VoR Daily Meditation — GitHub Actions Workflow
-# Version: 2026-03-23.11
+# Version: 2026-07-05.13
+#
+# Changes in .13 (2026-07-05):
+# - Added YT_PLAYLIST_ID_EN as a passthrough repository Variable in the
+#   "Upload English video to YouTube" step. Previously the workflow never
+#   set this env var at all, so upload_youtube.py silently fell back to a
+#   playlist ID hardcoded from the original developer's channel — causing
+#   HttpError 403 playlistItemsNotAccessible for any other channel/account.
+#   Set the YT_PLAYLIST_ID_EN repository Variable to a playlist ID on your
+#   own channel to enable playlist assignment; leave it unset to upload
+#   without adding to any playlist.
+#
+# Changes in .12 (2026-07-05):
+# - CORRECTED a mistake introduced in .11. GitHub Actions semantics are the
+#   OPPOSITE of what .11 assumed: continue-on-error forces conclusion to
+#   'success' even when the step's command actually failed. outcome is the
+#   real, pre-override result. .11 switched all gates from outcome to
+#   conclusion based on a backwards understanding — this silently let
+#   downstream steps run after real upstream failures (e.g. "Upload English
+#   video to YouTube" ran after a failed "Build English video" because
+#   continue-on-error had forced build_en's conclusion to 'success'), and
+#   caused failure notifications to never fire since conclusion never
+#   equals 'failure' on a continue-on-error step.
+#   Fix: every gate on a continue-on-error step (background, build_en,
+#   upload_en, translate_es, build_es, upload_es) now checks .outcome.
+#   steps.social and steps.commit are unaffected (no continue-on-error on
+#   those steps, so outcome and conclusion are always identical there).
+#
+# Changes in .11 (2026-03-23):
+# - (Superseded by .12 above — this change was based on a backwards
+#   understanding of outcome vs conclusion and has been reverted.)
 #
 # Changes in .11 (2026-03-23):
 # - Fixed failure notifications never firing for continue-on-error steps.
@@ -91,15 +121,18 @@ name: Daily Meditation Poster
 #    1  High           — Total social post failure (nothing posted today)
 #
 # NOTE ON continue-on-error AND NOTIFICATIONS:
-#   Steps with continue-on-error: true always show outcome='success' even
-#   when the command fails. Only conclusion='failure' reflects the real exit
-#   code. All failure notifications use conclusion, not outcome.
+#   Steps with continue-on-error: true always show conclusion='success' even
+#   when the command fails — continue-on-error forces conclusion to success
+#   so the job doesn't halt. outcome reflects the real, pre-override result.
+#   All failure/success gates below use outcome, not conclusion, for any
+#   step that has continue-on-error: true.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   schedule:
-    - cron: '30 6 * * *'  # 1:30 AM CDT (UTC-5, summer)
+   # 1:30 AM CDT (UTC-5, summer)
+    - cron: '30 6 * * *' 
 
   # Allows manual trigger from GitHub Actions tab
   workflow_dispatch:
@@ -127,12 +160,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ── Step 1: Scrape meditation text + post to Bluesky and X ───────────────
+      # ── Step 1: Scrape meditation text (+ post to Bluesky/X if enabled) ──────
       #
       # daily_poster.py checks for meditations/MM-DD.posted before posting.
       # If found, exits 0 cleanly — prevents duplicates on manual re-runs.
       #
-      - name: Scrape meditation and post to Bluesky + X
+      # This step always runs even with social posting disabled: it scrapes
+      # and caches meditations/MM-DD.txt, which the video pipeline below
+      # depends on. Bluesky/X posting itself is gated by config.yml
+      # (social.enabled) inside daily_poster.py, not by this workflow.
+      #
+      - name: Scrape meditation (+ social post if enabled)
         id: social
         env:
           BSKY_USERNAME: ${{ secrets.BSKY_USERNAME }}
@@ -166,7 +204,7 @@ jobs:
           python download_background.py --output /tmp/background.mp4
 
       - name: Notify — Pexels video skipped (soft warning)
-        if: vars.ENABLE_VIDEO == 'true' && steps.background.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
         run: |
           if [ -f /tmp/pexels_warning.txt ]; then
             MSG=$(cat /tmp/pexels_warning.txt)
@@ -180,7 +218,7 @@ jobs:
           fi
 
       - name: Notify — background download failed
-        if: vars.ENABLE_VIDEO == 'true' && steps.background.conclusion == 'failure'
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'failure'
         run: |
           curl -s \
             --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
@@ -189,19 +227,23 @@ jobs:
             --form-string "message=All Pexels video IDs failed on $(date +'%m-%d'). No video built today. Check backgrounds.txt." \
             --form-string "priority=0" \
             https://api.pushover.net/1/messages.json
-
+      
       # ── Step 3: Install video dependencies ───────────────────────────────────
       - name: Install video dependencies (ffmpeg + edge-tts)
-        if: vars.ENABLE_VIDEO == 'true' && steps.background.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fonts-liberation
-          pip install edge-tts pillow
 
+          pip install pillow
+          pip install --force-reinstall --no-deps "git+https://www.google.com/url?q=https://github.com/jonata/edge-tts@8a5844c3a1d33e4e8f2f3e14535542c0d75d4248&source=gmail&ust=1791929453718000&sa=E"
+          python -c "import edge_tts.constants as c; assert 'msedgeservices' in c.WSS_URL; print('edge-tts endpoint OK')"
+
+        
       # ── Step 4: Build and upload English video to YouTube ────────────────────
       - name: Build English video
         id: build_en
-        if: vars.ENABLE_VIDEO == 'true' && steps.background.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
         continue-on-error: true
         run: |
           chmod +x build-video.sh
@@ -211,20 +253,25 @@ jobs:
 
       - name: Upload English video to YouTube
         id: upload_en
-        if: vars.ENABLE_VIDEO == 'true' && steps.build_en.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && steps.build_en.outcome == 'success'
         continue-on-error: true
         env:
           YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
+          # Set this repository Variable to a playlist ID on YOUR channel.
+          # Left unset, videos upload fine but skip playlist assignment —
+          # the script's hardcoded fallback ID belongs to a different
+          # channel and will fail with playlistItemsNotAccessible.
+          YT_PLAYLIST_ID_EN: ${{ vars.YT_PLAYLIST_ID_EN }}
         run: |
           python upload_youtube.py
 
       - name: Notify — English video failure
         if: |
           vars.ENABLE_VIDEO == 'true' &&
-          (steps.build_en.conclusion == 'failure' || steps.upload_en.conclusion == 'failure')
+          (steps.build_en.outcome == 'failure' || steps.upload_en.outcome == 'failure')
         run: |
           STAGE="build"
-          if [ "${{ steps.build_en.conclusion }}" == "success" ]; then STAGE="upload"; fi
+          if [ "${{ steps.build_en.outcome }}" == "success" ]; then STAGE="upload"; fi
           curl -s \
             --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
             --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
@@ -236,7 +283,7 @@ jobs:
       # ── Step 5: Translate, build, and upload Spanish video ───────────────────
       - name: Translate meditation to Spanish
         id: translate_es
-        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.background.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.background.outcome == 'success'
         continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -245,7 +292,7 @@ jobs:
           python translate_meditation.py --date $MMDD
 
       - name: Notify — Spanish translation failure
-        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.translate_es.conclusion == 'failure'
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.translate_es.outcome == 'failure'
         run: |
           curl -s \
             --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
@@ -257,7 +304,7 @@ jobs:
 
       - name: Build Spanish video
         id: build_es
-        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.translate_es.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.translate_es.outcome == 'success'
         continue-on-error: true
         run: |
           chmod +x build-video.sh
@@ -267,7 +314,7 @@ jobs:
 
       - name: Upload Spanish video to YouTube
         id: upload_es
-        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.build_es.conclusion == 'success'
+        if: vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' && steps.build_es.outcome == 'success'
         continue-on-error: true
         env:
           YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
@@ -278,10 +325,10 @@ jobs:
       - name: Notify — Spanish build or upload failure
         if: |
           vars.ENABLE_VIDEO == 'true' && vars.ENABLE_SPANISH == 'true' &&
-          (steps.build_es.conclusion == 'failure' || steps.upload_es.conclusion == 'failure')
+          (steps.build_es.outcome == 'failure' || steps.upload_es.outcome == 'failure')
         run: |
           STAGE="build"
-          if [ "${{ steps.build_es.conclusion }}" == "success" ]; then STAGE="upload"; fi
+          if [ "${{ steps.build_es.outcome }}" == "success" ]; then STAGE="upload"; fi
           curl -s \
             --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
             --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
@@ -370,12 +417,12 @@ jobs:
         if: |
           always() &&
           steps.commit.outcome == 'success' &&
-          steps.background.conclusion != 'failure' &&
-          steps.build_en.conclusion != 'failure' &&
-          steps.upload_en.conclusion != 'failure' &&
-          steps.translate_es.conclusion != 'failure' &&
-          steps.build_es.conclusion != 'failure' &&
-          steps.upload_es.conclusion != 'failure'
+          steps.background.outcome != 'failure' &&
+          steps.build_en.outcome != 'failure' &&
+          steps.upload_en.outcome != 'failure' &&
+          steps.translate_es.outcome != 'failure' &&
+          steps.build_es.outcome != 'failure' &&
+          steps.upload_es.outcome != 'failure'
         run: |
           curl -s \
             --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
