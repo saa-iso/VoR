@@ -227,15 +227,19 @@ jobs:
             --form-string "message=All Pexels video IDs failed on $(date +'%m-%d'). No video built today. Check backgrounds.txt." \
             --form-string "priority=0" \
             https://api.pushover.net/1/messages.json
-
+      
       # ── Step 3: Install video dependencies ───────────────────────────────────
       - name: Install video dependencies (ffmpeg + edge-tts)
         if: vars.ENABLE_VIDEO == 'true' && steps.background.outcome == 'success'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fonts-liberation
-          pip install edge-tts pillow
 
+          pip install pillow
+          pip install --force-reinstall --no-deps "git+https://www.google.com/url?q=https://github.com/jonata/edge-tts@8a5844c3a1d33e4e8f2f3e14535542c0d75d4248&source=gmail&ust=1791929453718000&sa=E"
+          python -c "import edge_tts.constants as c; assert 'msedgeservices' in c.WSS_URL; print('edge-tts endpoint OK')"
+
+        
       # ── Step 4: Build and upload English video to YouTube ────────────────────
       - name: Build English video
         id: build_en
